@@ -1,20 +1,24 @@
 import openai
 import fitz  # PyMuPDF
 import pandas as pd
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse
-from io import StringIO
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi.responses import FileResponse, JSONResponse
+from io import StringIO, BytesIO
 import os
 import re
 from fractions import Fraction
 from tempfile import NamedTemporaryFile
 from dotenv import load_dotenv
+from typing import Optional
 
 load_dotenv()
 
 openai.api_key = os.getenv("API_KEY")
 
 app = FastAPI()
+
+# List to store the processed output
+processed_outputs = []
 
 def clean_room_name(room):
     room_str = str(room)
@@ -28,6 +32,16 @@ async def read_pdf(file) -> str:
         text += page.get_text()
     print("Extracted PDF Text:", text)  # Debug: Check PDF text extraction
     return text
+
+async def read_xlsx(file) -> str:
+    content = await file.read()
+    xlsx_data = BytesIO(content)
+    df = pd.read_excel(xlsx_data)
+
+    # Convert the DataFrame to CSV format for processing, similar to the PDF flow
+    csv_data = df.to_csv(index=False)
+    print("Extracted XLSX Data:", csv_data)  # Debug: Check XLSX data extraction
+    return csv_data
 
 def format_fraction(value):
     try:
@@ -58,9 +72,9 @@ def post_process_dataframe(df):
     
     return df
 
-def extract_data_with_gpt4(pdf_text):
+def extract_data_with_gpt4(text, query=None):
     prompt = f"""
-    The following text is extracted from a PDF document related to window and door installation. 
+    The following text is extracted from a document related to window and door installation. 
     Your task is to extract the following columns from the text and present them in CSV format:
     - Room
     - Width
@@ -100,10 +114,12 @@ def extract_data_with_gpt4(pdf_text):
     - "SIDE LIGHT": $150
 
     Make sure the CSV columns align correctly, and leave the "Additional" and "Total Labour" columns empty.
-    
-    Extracted PDF Text:
-    {pdf_text}
     """
+    if query:
+        prompt += f"\n\nUser query: {query}"
+
+    prompt += f"\n\nExtracted Text:\n{text}"
+
     response = openai.ChatCompletion.create(
         model="gpt-4",
         messages=[{"role": "system", "content": prompt}],
@@ -134,9 +150,7 @@ def parse_csv_data(csv_data):
 
     return df
 
-# Updated function to structure the CSV layout similar to the image examples
 def append_summary_to_csv(df):
-    # Manually creating the rows and columns based on the desired structure in the images
     structured_data = {
         "Column 1": ["Type Of Structure", "Luxury Condo Price", "Construction Type", "Engineering Needed", "Scaffold", 
                      "Caulking and Screws", "Credit Card Fees", "Credit Card Fees Amount", "Shutters", 
@@ -159,23 +173,28 @@ def append_summary_to_csv(df):
     return final_df
 
 @app.post("/uploadfile/")
-async def create_upload_file(file: UploadFile = File(...)):
-    if not file.filename.endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Invalid file format. Please upload a PDF file.")
+async def create_upload_file(file: Optional[UploadFile] = File(None), query: Optional[str] = Form(None)):
+    global processed_outputs
 
-    pdf_text = await read_pdf(file)
+    if file:
+        # File upload path
+        if file.filename.endswith('.pdf'):
+            text = await read_pdf(file)
 
-    if not pdf_text.strip():
-        raise HTTPException(status_code=500, detail="No text extracted from PDF.")
+            if not text.strip():
+                raise HTTPException(status_code=500, detail="No text extracted from PDF.")
 
-    extracted_csv_data = extract_data_with_gpt4(pdf_text)
+            extracted_csv_data = extract_data_with_gpt4(text)
+            processed_outputs.append(extracted_csv_data)
 
-    if extracted_csv_data:
-        print("Extracted CSV Data:", extracted_csv_data)  # Debug: Check extracted CSV data
-        df = parse_csv_data(extracted_csv_data)
-
-        if df.empty:
-            raise HTTPException(status_code=500, detail="Extracted data is empty or invalid.")
+        elif file.filename.endswith('.xlsx'):
+            csv_data = await read_xlsx(file)
+            extracted_csv_data = extract_data_with_gpt4(csv_data)
+            processed_outputs.append(extracted_csv_data)
+        else:
+            raise HTTPException(status_code=400, detail="Invalid file format. Please upload a PDF or XLSX file.")
+        
+        df = parse_csv_data(processed_outputs[-1])
 
         # Append summary to the CSV data (with structured layout)
         df = append_summary_to_csv(df)
@@ -185,8 +204,20 @@ async def create_upload_file(file: UploadFile = File(...)):
             tmp_file_path = tmp_file.name
 
         return FileResponse(tmp_file_path, filename=f"{os.path.splitext(file.filename)[0]}.csv")
+
+    elif query:
+        # Conversation path: handle user query
+        if not processed_outputs:
+            raise HTTPException(status_code=400, detail="No file has been uploaded yet.")
+
+        latest_output = processed_outputs[-1]
+        response = extract_data_with_gpt4(latest_output, query)
+        processed_outputs.append(response)
+
+        return JSONResponse(content={"response": response})
+
     else:
-        raise HTTPException(status_code=500, detail="Failed to extract data from the PDF.")
+        raise HTTPException(status_code=400, detail="Please upload a file or provide a query.")
 
 
 if __name__ == "__main__":
