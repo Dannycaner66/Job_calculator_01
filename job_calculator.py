@@ -2,6 +2,7 @@ import openai
 import fitz  # PyMuPDF
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from io import StringIO, BytesIO
 import os
@@ -16,6 +17,13 @@ load_dotenv()
 openai.api_key = os.getenv("API_KEY")
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # This allows all domains, adjust in production
+    allow_credentials=True,
+    allow_methods=["*"],  # This allows all methods
+    allow_headers=["*"],  # This allows all headers
+)
 
 # List to store the processed output
 processed_outputs = []
