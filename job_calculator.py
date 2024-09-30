@@ -3,12 +3,11 @@ import fitz  # PyMuPDF
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from io import StringIO, BytesIO
 import os
 import re
 from fractions import Fraction
-from tempfile import NamedTemporaryFile
 from dotenv import load_dotenv
 from typing import Optional
 
@@ -19,13 +18,12 @@ openai.api_key = os.getenv("API_KEY")
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # This allows all domains, adjust in production
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # This allows all methods
-    allow_headers=["*"],  # This allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# List to store the processed output
 processed_outputs = []
 
 def clean_room_name(room):
@@ -38,7 +36,6 @@ async def read_pdf(file) -> str:
     text = ""
     for page in doc:
         text += page.get_text()
-    print("Extracted PDF Text:", text)  # Debug: Check PDF text extraction
     return text
 
 async def read_xlsx(file) -> str:
@@ -46,9 +43,7 @@ async def read_xlsx(file) -> str:
     xlsx_data = BytesIO(content)
     df = pd.read_excel(xlsx_data)
 
-    # Convert the DataFrame to CSV format for processing, similar to the PDF flow
     csv_data = df.to_csv(index=False)
-    print("Extracted XLSX Data:", csv_data)  # Debug: Check XLSX data extraction
     return csv_data
 
 def format_fraction(value):
@@ -72,10 +67,10 @@ def post_process_dataframe(df):
         'Width': 0,
         'Height': 0,
         'Type': 'N/A',
-        'Panel': 'N/A',  # Set panel as empty initially
-        'Amount': '',  # Set amount as empty as per the request
-        'Additional': '',  # Explicitly set to empty
-        'Total Labour': ''  # Explicitly set to empty
+        'Panel': 'N/A',
+        'Amount': '',
+        'Additional': '',
+        'Total Labour': ''
     }, inplace=True)
     
     return df
@@ -93,35 +88,7 @@ def extract_data_with_gpt4(text, query=None):
     - Total Labour (leave it empty)
     - Amount
 
-    The "Panel" column should be populated based on the following values:
-    - "OX"
-    - "XO"
-    - "XOX"
-    - "SINGLE"
-    - "DOUBLE"
-    
-    For each entry, the panel should be calculated based on the Type:
-    - "HORIZONTAL ROLLER XO": OX
-    - "HORIZONTAL ROLLER XOX": XOX
-    - "SINGLE HUNG": SINGLE
-    - "FRENCH DOOR": DOUBLE
-    - "DOUBLE FRENCH DOOR": DOUBLE
-    - "SLIDING GLASS DOOR XO": XO
-    - "SLIDING GLASS DOOR XX": XX
-    - If no specific value is found, leave the panel blank.
-
-    For the "Amount", the calculation should be based on the following rules:
-    - "HORIZONTAL ROLLER XO": $180
-    - "HORIZONTAL ROLLER XOX": $300
-    - "SINGLE HUNG": $180
-    - "FRENCH DOOR": $450
-    - "DOUBLE FRENCH DOOR": $800
-    - "SLIDING GLASS DOOR": $250 per panel (X or O count in Type)
-    - "FIXED WINDOW": $10 per square foot (Width * Height)
-    - "STORE FRONT": $11 per square foot (Width * Height)
-    - "SIDE LIGHT": $150
-
-    Make sure the CSV columns align correctly, and leave the "Additional" and "Total Labour" columns empty.
+    Make sure the columns align correctly.
     """
     if query:
         prompt += f"\n\nUser query: {query}"
@@ -131,10 +98,8 @@ def extract_data_with_gpt4(text, query=None):
     response = openai.ChatCompletion.create(
         model="gpt-4",
         messages=[{"role": "system", "content": prompt}],
-        max_tokens=2000  
+        max_tokens=2000
     )
-
-    print("GPT-4 Response:", response)  # Debug: Check GPT-4 response
 
     if response and 'choices' in response:
         return response['choices'][0]['message']['content'].strip()
@@ -152,33 +117,26 @@ def parse_csv_data(csv_data):
     df["Width"] = df["Width"].apply(format_fraction)
     df["Height"] = df["Height"].apply(format_fraction)
 
-    # Ensure 'Additional' and 'Total Labour' columns are empty
     df['Additional'] = ''
     df['Total Labour'] = ''
 
     return df
 
-def append_summary_to_csv(df):
-    structured_data = {
-        "Column 1": ["Type Of Structure", "Luxury Condo Price", "Construction Type", "Engineering Needed", "Scaffold", 
-                     "Caulking and Screws", "Credit Card Fees", "Credit Card Fees Amount", "Shutters", 
-                     "Miscellaneous", "Engineering Fees"],
-        "Column 2": ["", "", "", "", "", "00", "", "", "", "", ""],
-        "Column 3": ["", "Contract Total", "Material Amount", "Material Tax", "Labor Cost", "Total Cost", 
-                     "Commission Amount", "Commission Percent", "Profit Percentage", "Profit Amount", "Drive"],
-        "Column 4": ["", "$00", "00", "$00", "$00", "$00", "00", "0%", "00%", 
-                     "00", ""],
-        "Column 5": ["", "HOA", "Permit", "Terms Selection", "Custom Terms", "Custom Terms Notes", "Financing", 
-                     "Financing Plan", "", "", ""],
-        "Column 6": ["", "y/n", "Y/n", "", "", "", "", "", "", "", ""],
-    }
-    
-    structured_df = pd.DataFrame(structured_data)
-    
-    # Combine the extracted CSV data with the structured summary
-    final_df = pd.concat([df, structured_df], ignore_index=True)
-    
-    return final_df
+def convert_df_to_json(df):
+    # Convert the DataFrame to a list of dictionaries
+    data_list = []
+    for _, row in df.iterrows():
+        data_list.append({
+            "Room": row["Room"],
+            "Width": row["Width"],
+            "Height": row["Height"],
+            "Type": row["Type"],
+            "Panel": row["Panel"],
+            "Amount": row["Amount"],
+            "Additional": row["Additional"],
+            "Total Labour": row["Total Labour"]
+        })
+    return data_list
 
 @app.post("/uploadfile/")
 async def create_upload_file(file: Optional[UploadFile] = File(None), query: Optional[str] = Form(None)):
@@ -204,17 +162,12 @@ async def create_upload_file(file: Optional[UploadFile] = File(None), query: Opt
         
         df = parse_csv_data(processed_outputs[-1])
 
-        # Append summary to the CSV data (with structured layout)
-        df = append_summary_to_csv(df)
+        # Convert DataFrame to JSON format
+        json_data = convert_df_to_json(df)
 
-        with NamedTemporaryFile(delete=False, suffix=".csv") as tmp_file:
-            df.to_csv(tmp_file.name, index=False)
-            tmp_file_path = tmp_file.name
-
-        return FileResponse(tmp_file_path, filename=f"{os.path.splitext(file.filename)[0]}.csv")
+        return JSONResponse(content=json_data)
 
     elif query:
-        # Conversation path: handle user query
         if not processed_outputs:
             raise HTTPException(status_code=400, detail="No file has been uploaded yet.")
 
@@ -228,6 +181,6 @@ async def create_upload_file(file: Optional[UploadFile] = File(None), query: Opt
         raise HTTPException(status_code=400, detail="Please upload a file or provide a query.")
 
 
-if __name__ == "__main__":
+if _name_ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
